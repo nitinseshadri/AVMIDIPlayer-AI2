@@ -18,8 +18,8 @@ import java.lang.*;
 import java.net.*;
 import java.util.*;
 
-import cn.sherlock.com.sun.media.sound.*;
-import jp.kshoji.javax.sound.midi.*;
+import android.media.MediaPlayer;
+import android.net.Uri;
 
 @DesignerComponent(version = AVMIDIPlayer.VERSION,
     description = "by nitinseshadri",
@@ -27,8 +27,6 @@ import jp.kshoji.javax.sound.midi.*;
     nonVisible = true)
 
 @SimpleObject(external = true)
-
-@UsesLibraries(libraries = "sherlockmidi-release.jar")
 
 @UsesPermissions(permissionNames = "android.permission.READ_EXTERNAL_STORAGE")
 
@@ -49,7 +47,7 @@ implements Component {
 
     // Variables //
 
-    private Sequencer sequencer;
+    private MediaPlayer mediaPlayer;
     private Boolean ready = false; // Are we ready for launch?
     private Boolean debug = true; // Set to true to enable debug toasts.
 
@@ -98,12 +96,6 @@ implements Component {
       } else if (e instanceof IOException) {
         form.dispatchErrorOccurredEvent(this, "Init",
             ErrorMessages.ERROR_CANNOT_READ_FILE, e.getMessage());
-      } else if (e instanceof MidiUnavailableException) {
-        form.dispatchErrorOccurredEvent(this, "Init",
-            ErrorMessages.ERROR_DEFAULT, e.getMessage());
-      } else if (e instanceof InvalidMidiDataException) {
-        form.dispatchErrorOccurredEvent(this, "Init",
-            ErrorMessages.ERROR_CANNOT_READ_FILE, e.getMessage());
       } else {
         form.dispatchErrorOccurredEvent(this, "Init",
             ErrorMessages.ERROR_DEFAULT, e.getMessage());
@@ -111,28 +103,6 @@ implements Component {
       ShowDebugToast(e.getMessage());
       Log.e(LOG_TAG, e.getMessage(), e);
       e.printStackTrace();
-    }
-
-    public void AddNotesToMetaTrack(Track track, Track metaTrack) {
-      for (int i = 0; i < track.size(); i++) {
-        MidiEvent me = track.get(i);
-        MidiMessage mm = me.getMessage();
-        if (mm instanceof ShortMessage) {
-          ShortMessage sm = (ShortMessage) mm;
-          int t = sm.getCommand();
-          if (t > 127) {
-            t = sm.getCommand() - 128; // HACK: MetaMessages only allow a range of 0-127. We will add back 128 later on.
-            byte[] d = sm.getMessage();
-            int l = (d == null ? 0 : d.length);
-            try {
-              MetaMessage metaMessage = new MetaMessage(t, d, l);
-              metaTrack.add(new MidiEvent(metaMessage, me.getTick()));
-            } catch (Throwable e) {
-              HandleException(e);
-            }
-          }
-        }
-      }
     }
 
     private void ShowDebugToast(String message) {
@@ -146,58 +116,7 @@ implements Component {
     @SimpleFunction(description = "Initializes a newly allocated MIDI player with the contents of the file specified by the URL, using the specified sound bank.")
     public void Init(String contentsOf, String soundBankURL) {
       try {
-        // Synthesizer init
-        final SoftSynthesizer synthesizer = new SoftSynthesizer();
-        synthesizer.open();
-        synthesizer.loadAllInstruments(new SF2Soundbank(new java.io.File(AbsoluteFileName(soundBankURL))));
-        // Sequencer init
-        sequencer = MidiSystem.getSequencer();
-        sequencer.open();
-        sequencer.setSequence(MidiSystem.getSequence(new java.io.File(AbsoluteFileName(contentsOf))));
-        // HACK: All this Sequencer-Synthesizer connection logic to replace one pesky line (below)
-        //sequencer.getTransmitter().setReceiver(synthesizer.getReceiver());
-        // Control Change event handler
-        int[] cc = new int[128];
-        for (int i = 0; i < 128; i++) { // We want to listen to controllers 0-127, basically all of 'em
-          cc[i] = i;
-        }
-        sequencer.addControllerEventListener(new ControllerEventListener() {
-          public void controlChange(ShortMessage m) { // Send control change messages to the synthesizer
-            try {
-              synthesizer.getReceiver().send(m, -1);
-            } catch (final Throwable e) {
-              container.$form().runOnUiThread(new Runnable() {
-                public void run() {
-                  HandleException(e);
-                }
-              });
-            }
-          }
-        }, cc);
-        // Meta Message event handler
-        Sequence sequence = sequencer.getSequence();
-        Track[] tracks = sequence.getTracks();
-        Track metaTrack = sequence.createTrack();
-        for (Track track : tracks) {
-          AddNotesToMetaTrack(track, metaTrack); // Create a special track with MetaMessages corresponding to MIDI events
-        }
-        sequencer.addMetaEventListener(new MetaEventListener() {
-          public void meta(MetaMessage m) { // Send meta messages to the synthesizer
-            try {
-              if (m.getType() == 47) { // Completed, fire event handler
-                Completed();
-              } else { // MIDI message, send to synthesizer
-                synthesizer.getReceiver().send(new ShortMessage(m.getType() + 128, m.getData()[0], m.getData()[1]), -1); // We added 128 back!
-              }
-            } catch (final Throwable e) {
-              container.$form().runOnUiThread(new Runnable() {
-                public void run() {
-                  HandleException(e);
-                }
-              });
-            }
-          }
-        });
+        mediaPlayer = MediaPlayer.create(context, Uri.parse(AbsoluteFileName(contentsOf)));
         ready = true;
         ShowDebugToast("Init successful");
       } catch (Throwable e) {
@@ -208,7 +127,11 @@ implements Component {
     @SimpleFunction(description = "Prepares to play the sequence by prerolling all events.")
     public void PrepareToPlay() {
       if (ready) {
-        // TODO
+        try {
+          mediaPlayer.prepare();
+        } catch (Throwable e) {
+          HandleException(e);
+        }
       } else {
         form.dispatchErrorOccurredEvent(this, "PrepareToPlay",
             ErrorMessages.ERROR_DEFAULT);
@@ -218,7 +141,7 @@ implements Component {
     @SimpleFunction(description = "Plays the sequence.")
     public void Play() {
       if (ready) {
-        sequencer.start();
+        mediaPlayer.start();
       } else {
         form.dispatchErrorOccurredEvent(this, "Play",
             ErrorMessages.ERROR_DEFAULT);
@@ -228,7 +151,7 @@ implements Component {
     @SimpleFunction(description = "Stops playing the sequence.")
     public void Stop() {
       if (ready) {
-        sequencer.stop();
+        mediaPlayer.pause();
       } else {
         form.dispatchErrorOccurredEvent(this, "Stop",
             ErrorMessages.ERROR_DEFAULT);
@@ -247,7 +170,7 @@ implements Component {
     @SimpleProperty(description = "A Boolean value that indicates whether the sequence is playing.")
     public boolean IsPlaying() {
       if (ready) {
-        return sequencer.isRunning();
+        return mediaPlayer.isPlaying();
       } else {
         form.dispatchErrorOccurredEvent(this, "IsPlaying",
             ErrorMessages.ERROR_DEFAULT);
@@ -256,9 +179,9 @@ implements Component {
     }
 
     @SimpleProperty(description = "The length of the currently loaded file, in seconds.")
-    public long Duration() {
+    public int Duration() {
       if (ready) {
-        return sequencer.getMicrosecondLength() / 1000000;
+        return mediaPlayer.getDuration() / 1000000;
       } else {
         form.dispatchErrorOccurredEvent(this, "Duration",
             ErrorMessages.ERROR_DEFAULT);
@@ -267,10 +190,10 @@ implements Component {
     }
 
     @SimpleProperty(description = "The current playback position, in seconds.")
-    public long CurrentPosition() {
+    public int CurrentPosition() {
       // Getter method
       if (ready) {
-        return sequencer.getMicrosecondPosition() / 1000000;
+        return mediaPlayer.getCurrentPosition() / 1000000;
       } else {
         form.dispatchErrorOccurredEvent(this, "CurrentPosition",
             ErrorMessages.ERROR_DEFAULT);
@@ -279,10 +202,10 @@ implements Component {
     }
     
     @SimpleProperty(description = "The current playback position, in seconds.")
-    public void CurrentPosition(long currentPosition) {
+    public void CurrentPosition(int currentPosition) {
       // Setter method
       if (ready) {
-        sequencer.setMicrosecondPosition(currentPosition * 1000000);
+        mediaPlayer.seekTo(currentPosition * 1000000);
       } else {
         form.dispatchErrorOccurredEvent(this, "CurrentPosition",
             ErrorMessages.ERROR_DEFAULT);
@@ -293,7 +216,8 @@ implements Component {
     public float Rate() {
       // Getter method
       if (ready) {
-        return sequencer.getTempoFactor();
+        //TODO
+        return 1.0f;
       } else {
         form.dispatchErrorOccurredEvent(this, "Rate",
             ErrorMessages.ERROR_DEFAULT);
@@ -305,7 +229,7 @@ implements Component {
     public void Rate(float rate) {
       // Setter method
       if (ready) {
-        sequencer.setTempoFactor(rate);
+        //TODO
       } else {
         form.dispatchErrorOccurredEvent(this, "Rate",
             ErrorMessages.ERROR_DEFAULT);
